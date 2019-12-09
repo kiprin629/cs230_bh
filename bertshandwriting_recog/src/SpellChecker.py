@@ -17,7 +17,7 @@ def correct_sentence(line):
 
 '''
 
-from autocorrect import spell
+from autocorrect import Speller
 
 
 def correct_sentence(line):
@@ -25,6 +25,6 @@ def correct_sentence(line):
     new_line = ""
     similar_word = {}
     for l in lines:
-        new_line += spell(l) + " "
+        new_line += Speller(l) + " "
     # similar_word[l]=spell.candidates(l)
     return new_line

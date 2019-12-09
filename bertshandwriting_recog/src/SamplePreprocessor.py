@@ -8,7 +8,6 @@ import cv2
 
 def preprocessor(img, imgSize, enhance=False, dataAugmentation=False):
     "put img into target img of size imgSize, transpose for TF and normalize gray-values"
-
     # there are damaged files in IAM dataset - just use black image instead
     if img is None:
         img = np.zeros([imgSize[1], imgSize[0]]) # (64,800)

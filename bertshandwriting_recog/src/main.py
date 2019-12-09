@@ -2,16 +2,20 @@ import argparse
 import os
 import sys
 
+import logging
+logging.getLogger('tensorflow').disabled = True
+
 import cv2
 import editdistance
 import numpy as np
 import tensorflow as tf
+import numpy as np
 
 from DataLoader import Batch, DataLoader, FilePaths
 from SamplePreprocessor import preprocessor, wer
 from Model import DecoderType, Model
 from SpellChecker import correct_sentence
-
+from fitbert import FitBert
 
 def train(model, loader):
     """ Train the neural network """
@@ -21,6 +25,8 @@ def train(model, loader):
     earlyStopping = 25  # Stop training after this number of epochs without improvement
     batchNum = 0
 
+    bestWordErrorRate = float('inf')
+    
     totalEpoch = len(loader.trainSamples)//Model.batchSize # loader.numTrainSamplesPerEpoch
 
     while True:
@@ -53,6 +59,14 @@ def train(model, loader):
         model.writer.add_summary(wer_summary, epoch)
 
         # If best validation accuracy so far, save model parameters
+        
+        #if wordErrorRate < bestWordErrorRate:
+        #    print('Word error rate improved, save model')
+        #    bestWordErrorRate = wordErrorRate
+        #    noImprovementSince = 0
+        #    model.save()
+        #    open(FilePaths.fnAccuracy, 'w').write(
+        #        'Validation word error rate of saved model: %f%%' % (wordErrorRate*100.0))
         if charErrorRate < bestCharErrorRate:
             print('Character error rate improved, save model')
             bestCharErrorRate = charErrorRate
@@ -86,8 +100,8 @@ def validate(model, loader):
         iterInfo = loader.getIteratorInfo()
         print('Batch:', iterInfo[0], '/', iterInfo[1])
         batch = loader.getNext()
-        recognized = model.inferBatch(batch)
-
+        recognized, scores = model.inferBatch(batch)
+        
         print('Ground truth -> Recognized')
         for i in range(len(recognized)):
             numWordOK += 1 if batch.gtTexts[i] == recognized[i] else 0
@@ -127,17 +141,22 @@ def generate_random_images():
 
 def infer(model, fnImg):
     """ Recognize text in image provided by file path """
-    img = preprocessor(cv2.imread(fnImg, cv2.IMREAD_GRAYSCALE), imgSize=Model.imgSize)
+    img_temp = cv2.imread(fnImg, cv2.IMREAD_GRAYSCALE)
+    img = preprocessor(img_temp, imgSize=Model.imgSize)
     if img is None:
         print("Image not found")
 
     imgs = load_different_image()
     imgs = [img] + imgs
     batch = Batch(None, imgs)
-    recognized = model.inferBatch(batch)  # recognize text
-
-    print("Without Correction", recognized[0])
-    print("With Correction", correct_sentence(recognized[0]))
+    recognized, scores = model.inferBatch(batch)  # recognize text
+    
+#     score_postup = []
+#     for charpos in range(len(recognized[0])+4):
+#         score_postup.append((np.argmax(scores[charpos][0]), max(scores[charpos][0])))
+    
+#     print(recognized)
+    #print("With Correction", correct_sentence(recognized[0][0]))
     return recognized[0]
 
 
@@ -151,13 +170,15 @@ def main():
         "--validate", help="validate the neural network", action="store_true")
     parser.add_argument(
         "--wordbeamsearch", help="use word beam search instead of best path decoding", action="store_true")
+    parser.add_argument(
+        "--bert", help="use BERT to guess bad words", action="store_true")
     args = parser.parse_args()
 
     decoderType = DecoderType.BestPath
+
     if args.wordbeamsearch:
         decoderType = DecoderType.WordBeamSearch
-
-    # Train or validate on Cinnamon dataset
+    # Train or validate
     if args.train or args.validate:
         # Load training data, create TF model
         loader = DataLoader(FilePaths.fnTrain, Model.batchSize,
@@ -165,17 +186,17 @@ def main():
 
         # Execute training or validation
         if args.train:
-            model = Model(loader.charList, decoderType)
+            model = Model(loader.charList, decoderType, bert = args.bert)
             train(model, loader)
         elif args.validate:
-            model = Model(loader.charList, decoderType, mustRestore=False)
+            model = Model(loader.charList, decoderType, mustRestore=False, bert = args.bert)
             validate(model, loader)
 
     # Infer text on test image
     else:
         print(open(FilePaths.fnAccuracy).read())
         model = Model(open(FilePaths.fnCharList).read(),
-                      decoderType, mustRestore=False)
+                      decoderType, mustRestore=False, bert = args.bert)
         infer(model, FilePaths.fnInfer)
 
 

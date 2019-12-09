@@ -4,7 +4,9 @@ import codecs
 import sys
 
 import tensorflow as tf
+import numpy as np
 
+from fitbert import FitBert
 from DataLoader import FilePaths
 
 
@@ -16,17 +18,22 @@ class DecoderType:
 
 class Model:
     # Model Constants
-    batchSize = 10 # 50
+    batchSize = 50 #10 # 50
     imgSize = (800, 64)
     maxTextLen = 100
 
-    def __init__(self, charList, decoderType=DecoderType.BestPath, mustRestore=False):
+    def __init__(self, charList, decoderType=DecoderType.BestPath, mustRestore=False, bert=False):
         self.charList = charList
         self.decoderType = decoderType
         self.mustRestore = mustRestore
         self.snapID = 0
-
-
+        self.bert = bert
+        self.FB = None
+        
+        self.corpus = []
+        if(bert):
+            self.FB = fb = FitBert()
+ 
         # input image batch
         self.inputImgs = tf.placeholder(tf.float32, shape=(None, Model.imgSize[0], Model.imgSize[1]))
 
@@ -171,20 +178,24 @@ class Model:
             elif self.decoderType == DecoderType.WordBeamSearch:
                 # Import compiled word beam search operation (see https://github.com/githubharald/CTCWordBeamSearch)
                 word_beam_search_module = tf.load_op_library(
-                    './CTCWordBeamSearch/cpp/proj/TFWordBeamSearch.so')
+                    './CTCWordBeamSearchWeinman/CTCWordBeamSearch/cpp/proj/TFWordBeamSearch.so')
 
                 # Prepare: dictionary, characters in dataset, characters forming words
-                chars = codecs.open(FilePaths.wordCharList.txt, 'r').read()
-                wordChars = codecs.open(
-                    FilePaths.fnWordCharList, 'r').read()
-                corpus = codecs.open(FilePaths.corpus.txt, 'r').read()
+                chars = str().join(self.charList)
+                #chars = codecs.open(FilePaths.fnCharList, 'r').read()
+                wordChars = open(FilePaths.fnWordCharList).read().splitlines()[0]
+                #wordChars = codecs.open(FilePaths.fnWordCharList, 'r').read()
+                self.corpus = open(FilePaths.fnCorpus).read()
+                #corpus = codecs.open(FilePaths.fnCorpus, 'r').read()
 
                 # # Decoder using the "NGramsForecastAndSample": restrict number of (possible) next words to at most 20 words: O(W) mode of word beam search
-                # decoder = word_beam_search_module.word_beam_search(tf.nn.softmax(ctcIn3dTBC, dim=2), 25, 'NGramsForecastAndSample', 0.0, corpus.encode('utf8'), chars.encode('utf8'), wordChars.encode('utf8'))
+                beamWidth = 20
+                lmType='NGramsForecastAndSample'
+                lmSmoothing=0.1
+                self.decoder = word_beam_search_module.word_beam_search(tf.nn.softmax(self.ctcIn3dTBC, dim=2), beamWidth, lmType, lmSmoothing, self.corpus.encode('utf8'), chars.encode('utf8'), wordChars.encode('utf8'))
 
                 # Decoder using the "Words": only use dictionary, no scoring: O(1) mode of word beam search
-                self.decoder = word_beam_search_module.word_beam_search(tf.nn.softmax(
-                    self.ctcIn3dTBC, dim=2), 25, 'Words', 0.0, corpus.encode('utf8'), chars.encode('utf8'), wordChars.encode('utf8'))
+                # self.decoder = word_beam_search_module.word_beam_search(tf.nn.softmax(self.ctcIn3dTBC, dim=2), 25, 'Words', 0.0, corpus.encode('utf8'), chars.encode('utf8'), wordChars.encode('utf8'))
 
         # Return a CTC operation to compute the loss and CTC operation to decode the RNN output
         return self.loss, self.decoder
@@ -258,7 +269,8 @@ class Model:
                 batchElement = idx2d[0]  # index according to [b,t]
                 encodedLabelStrs[batchElement].append(label)
         # Map labels to chars for all batch elements
-        return [str().join([self.charList[c] for c in labelStr]) for labelStr in encodedLabelStrs]
+        
+        return [str().join([self.charList[c] for c in labelStr]) for labelStr in encodedLabelStrs], encodedLabelStrs
 
     def trainBatch(self, batch, batchNum):
         """ Feed a batch into the NN to train it """
@@ -267,7 +279,8 @@ class Model:
             0.001 if self.batchesTrained < 2750 else 0.001)
         evalList = [self.merge, self.optimizer, self.loss]
         feedDict = {self.inputImgs: batch.imgs, self.gtTexts: sparse, self.seqLen: [Model.maxTextLen] * Model.batchSize, self.learningRate: rate}
-        (loss_summary, _, lossVal) = self.sess.run(evalList, feedDict)
+        run_options = tf.RunOptions(report_tensor_allocations_upon_oom = True)
+        (loss_summary, _, lossVal) = self.sess.run(evalList, feedDict, run_options)
         # Tensorboard: Add loss_summary to writer
         self.writer.add_summary(loss_summary, batchNum)
         self.batchesTrained += 1
@@ -298,8 +311,12 @@ class Model:
         """ Feed a batch into the NN to recognize texts """
         numBatchElements = len(batch.imgs)
         feedDict = {self.inputImgs: batch.imgs, self.seqLen: [Model.maxTextLen] * numBatchElements}
-        evalRes = self.sess.run([self.decoder, self.ctcIn3dTBC], feedDict)
-        decoded = evalRes[0]
+        scores = []
+        if self.decoderType == DecoderType.WordBeamSearch:
+            decoded, scores = self.sess.run([self.decoder, self.ctcIn3dTBC], feedDict)       
+        else:
+            evalRes = self.sess.run([self.decoder, self.ctcIn3dTBC], feedDict)
+            decoded = evalRes[0] 
         # # Dump RNN output to .csv file
         # decoded, rnnOutput = self.sess.run([self.decoder, self.rnnOutput], {
         #                                    self.inputImgs: batch.imgs, self.seqLen: [Model.maxTextLen] * Model.batchSize})
@@ -311,9 +328,65 @@ class Model:
         #         csv += str(rnnOutput[t, b, c]) + ';'
         #     csv += '\n'
         # open('mat_0.csv', 'w').write(csv)
+        texts, encodings = self.decoderOutputToText(decoded)
+        if self.bert:
+            texts = self.deployBert(texts, encodings, scores)    
+        return texts, encodings
 
-        texts = self.decoderOutputToText(decoded)
-        return texts
+    def deployBert(self, texts, encodings, scores):
+        mask = '***mask***'
+        thresh_max = 2.5
+        thresh_enc = -10
+        use_max = False
+        
+        spaces_locs = [np.argwhere(np.array(encoding)==0) for encoding in encodings]
+        top_scores = []
+        if use_max:
+            top_scores = np.amax(scores,axis = 2)
+            sum_top_scores = np.cumsum(top_scores, axis = 0)
+        else:
+            top_scores = np.zeros((scores.shape[0],scores.shape[1]))
+            for sent_enc in range(len(encodings)):
+                for i in range(len(encodings[sent_enc])):
+                    top_scores[i][sent_enc] = scores[i][sent_enc][encodings[sent_enc][i]]
+        sum_top_scores = np.cumsum(top_scores, axis = 0)
+        word_scores = []
+        for sentence in range(Model.batchSize):
+            spaces = np.append(spaces_locs[sentence], len(texts[sentence]))
+            top_scores = sum_top_scores[:, sentence]
+            ws = []
+            if spaces[0] != 0:
+                ws.append(top_scores[spaces[0]-1]/spaces[0])
+            for i in range(len(spaces)-1):
+                end_word_pos = spaces[i+1]-1
+                start_word_pos = spaces[i]
+                if (start_word_pos != end_word_pos): #check for double space
+                    ws.append((top_scores[end_word_pos]-top_scores[start_word_pos])/(end_word_pos-start_word_pos))
+            word_scores.append(ws)
+#         print(word_scores)
+        tok_texts = [text.split() for text in texts]
+        for i in range(Model.batchSize):
+            print(word_scores[i], tok_texts[i])
+        berted_texts =[]
+        for i in range(Model.batchSize):
+            ws = word_scores[i]
+            t = tok_texts[i]
+            if use_max:
+                while min(ws) <= thresh_max:
+                    ind = np.argmin(np.array(ws))
+                    ws[ind] = 1000 
+                    t[ind] = mask
+                    new_word = self.FB.rank(' '.join(t), options=self.corpus.split())[0]
+                    t[ind] = new_word
+            else: 
+                while min(ws) <= thresh_enc:
+                    ind = np.argmin(np.array(ws))
+                    ws[ind] = 1000 
+                    t[ind] = mask
+                    new_word = self.FB.rank(' '.join(t), options=self.corpus.split())[0]
+                    t[ind] = new_word
+            berted_texts.append(' '.join(t))
+        return berted_texts
 
     def save(self):
         """ Save model to file """

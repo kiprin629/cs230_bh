@@ -18,12 +18,12 @@ from SamplePreprocessor import preprocessor
 
 class FilePaths:
     """ Filenames and paths to data """
-    fnCharList = '../model/charList.txt'
-    fnWordCharList = '../model/wordCharList.txt'
+    fnCharList = '../data/charList.txt'
+    fnWordCharList = '../data/wordCharList.txt'
     fnCorpus = '../data/corpus.txt'
     fnAccuracy = '../model/accuracy.txt'
     fnTrain = '../data/'
-    fnInfer = '../data/testImage1.png'  ## path to recognize the single image
+    fnInfer = '../data/testImage.png'  ## path to recognize the single image
 
 
 class Sample:
@@ -94,10 +94,12 @@ class DataLoader:
             print("Damaged images expected:", bad_samples_reference)
 
         # split into training and validation set: 90% - 10%
-        splitIdx = int(0.95 * len(self.samples))
-        self.trainSamples = self.samples[:splitIdx]
-        self.validationSamples = self.samples[splitIdx:]
-        print("Train: {}, Validation: {}".format(len(self.trainSamples), len(self.validationSamples)))
+        splitValIdx = int(0.9 * len(self.samples))
+        splitTestIdx = int(0.95 * len(self.samples))
+        self.trainSamples = self.samples[:splitValIdx]
+        self.validationSamples = self.samples[splitValIdx:splitTestIdx]
+        self.testSamples = self.samples[splitTestIdx:]
+        print("Train: {}, Validation: {}, Test: {}".format(len(self.trainSamples), len(self.validationSamples), len(self.testSamples)))
         # put lines into lists
         self.trainLines = [x.gtText for x in self.trainSamples]
         self.validationLines = [x.gtText for x in self.validationSamples]
